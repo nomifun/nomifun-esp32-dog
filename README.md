@@ -115,7 +115,7 @@ tools/                            设备工具
 
 ## 许可
 
-- 代码采用 MIT 许可，继承自 xiaozhi-esp32，见 [LICENSE](LICENSE)。`components/` 下的组件遵循各自的 LICENSE。
+- 本项目以 [MIT 许可](LICENSE) 开源。项目基于同为 MIT 许可的 xiaozhi-esp32 开发，LICENSE 中保留了其版权声明。`components/` 下的组件遵循各自的 LICENSE。
 - `dog_assets.bin` 中的字体、表情图片和唤醒词模型属于第三方资源，遵循各自的许可，不在本仓库 MIT 许可范围内。
 - 原理图与 PCB 的版权与许可以硬件原作者的声明为准，见 [hardware/README.md](hardware/README.md)。
 
