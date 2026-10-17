@@ -425,6 +425,10 @@ elseif(CONFIG_BOARD_TYPE_XINGZHI_CUBE_0_85TFT_ML307)
     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
     set(BUILTIN_ICON_FONT font_awesome_16_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_32)
+elseif(CONFIG_BOARD_TYPE_ZFSN_ESP32S3_DOG)
+    set(BOARD_TYPE "zfsn-esp32s3-dog")
+    set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
+    set(BUILTIN_ICON_FONT font_awesome_14_1)
 elseif(CONFIG_BOARD_TYPE_XINGZHI_CUBE_0_96OLED_WIFI)
     set(BOARD_TYPE "xingzhi-cube-0.96oled-wifi")
     set(BUILTIN_TEXT_FONT font_puhui_basic_14_1)
@@ -699,6 +703,16 @@ idf_component_register(SRCS ${SOURCES}
                     WHOLE_ARCHIVE
                     )
 
+# Explicit, local screen-output acceptance. This affects only main so normal
+# production and the diagnostic share the same SDK, RGB565 port and panel code.
+option(ZFSN_UI_CAPTURE_BUILD "Capture dog OLED submissions during a passive menu preview" OFF)
+if(ZFSN_UI_CAPTURE_BUILD)
+    if(NOT CONFIG_BOARD_TYPE_ZFSN_ESP32S3_DOG)
+        message(FATAL_ERROR "OLED capture requires the production dog board")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE CONFIG_ZFSN_UI_CAPTURE=1)
+endif()
+
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME
 # If BOARD_NAME is empty, use BOARD_TYPE
 if(NOT BOARD_NAME)
@@ -888,7 +902,16 @@ partition_table_get_partition_info(size "--partition-name assets" "size")
 partition_table_get_partition_info(offset "--partition-name assets" "offset")
 if ("${size}" AND "${offset}")
     # Flash assets based on configuration
-    if(CONFIG_FLASH_DEFAULT_ASSETS)
+    if(CONFIG_BOARD_TYPE_ZFSN_ESP32S3_DOG AND CONFIG_FLASH_DEFAULT_ASSETS)
+        # Flash this board's prebuilt assets image (font, 21 PNG emotions,
+        # wake-word model); building generic assets would replace its emotion
+        # collection.
+        set(DOG_ASSETS "${CMAKE_CURRENT_SOURCE_DIR}/boards/zfsn-esp32s3-dog/assets/dog_assets.bin")
+        if(NOT EXISTS "${DOG_ASSETS}")
+            message(FATAL_ERROR "Board assets image missing: ${DOG_ASSETS}")
+        endif()
+        esptool_py_flash_to_partition(flash "assets" "${DOG_ASSETS}")
+    elseif(CONFIG_FLASH_DEFAULT_ASSETS)
         # Build default assets based on configuration
         build_default_assets_bin()
         esptool_py_flash_to_partition(flash "assets" "${GENERATED_ASSETS_LOCAL_FILE}")

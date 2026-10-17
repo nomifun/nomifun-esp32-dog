@@ -10,6 +10,7 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
@@ -52,6 +53,9 @@ public:
     void DismissAlert();
     void AbortSpeaking(AbortReason reason);
     void ToggleChatState();
+    // Idempotent remote session intent, resolved on MainEventLoop.
+    // Does not interrupt setup, activation, upgrading or audio testing.
+    void SetChatActive(bool active);
     void StartListening();
     void StopListening();
     void Reboot();
@@ -78,6 +82,9 @@ private:
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
+    // Keep packets and TTS state transitions ordered without allowing an
+    // unbounded backlog of audio closures on the application task.
+    std::atomic<unsigned> pending_incoming_audio_{0};
 
     bool has_server_time_ = false;
     bool aborted_ = false;
@@ -86,7 +93,7 @@ private:
     TaskHandle_t main_event_loop_task_handle_ = nullptr;
 
     void OnWakeWordDetected();
-    void CheckNewVersion(Ota& ota);
+    bool CheckNewVersion(Ota& ota);
     void CheckAssetsVersion();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);

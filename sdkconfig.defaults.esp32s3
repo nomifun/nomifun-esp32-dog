@@ -1,6 +1,15 @@
 
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+# This board runs its flash in DIO mode
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+# Console on USB-Serial-JTAG: UART0 RXD/TXD are not connected on this board
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# This fork is dedicated to the dog board
+CONFIG_BOARD_TYPE_ZFSN_ESP32S3_DOG=y
+# Long UTF-8 file names on the SD card (Chinese song titles, /custom_action)
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_API_ENCODING_UTF_8=y
 
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 

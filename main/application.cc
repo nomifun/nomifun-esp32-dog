@@ -120,10 +120,17 @@ void Application::CheckAssetsVersion() {
     display->SetEmotion("microchip_ai");
 }
 
-void Application::CheckNewVersion(Ota& ota) {
+bool Application::CheckNewVersion(Ota& ota) {
+#if defined(CONFIG_BOARD_TYPE_ZFSN_ESP32S3_DOG)
+    // Keep a bad provisioning URL recoverable without an hour-long retry loop.
+    const int MAX_RETRY = 3;
+    const int INITIAL_RETRY_DELAY = 5;
+#else
     const int MAX_RETRY = 10;
+    const int INITIAL_RETRY_DELAY = 10;
+#endif
     int retry_count = 0;
-    int retry_delay = 10; // 初始重试延迟为10秒
+    int retry_delay = INITIAL_RETRY_DELAY;
 
     auto& board = Board::GetInstance();
     while (true) {
@@ -136,7 +143,17 @@ void Application::CheckNewVersion(Ota& ota) {
             retry_count++;
             if (retry_count >= MAX_RETRY) {
                 ESP_LOGE(TAG, "Too many retries, exit version check");
-                return;
+#if defined(CONFIG_BOARD_TYPE_ZFSN_ESP32S3_DOG)
+                SetDeviceState(kDeviceStateFatalError);
+                char message[256];
+                snprintf(message, sizeof(message),
+                    "请检查OTA地址 (code=%d)\n长按BOOT 5秒并松开可重新配网", err);
+                Alert("Wi-Fi已连接，OTA服务不可用", message,
+                      "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
+                return false;
+#else
+                return true;
+#endif
             }
 
             char error_message[128];
@@ -156,11 +173,11 @@ void Application::CheckNewVersion(Ota& ota) {
             continue;
         }
         retry_count = 0;
-        retry_delay = 10; // 重置重试延迟时间
+        retry_delay = INITIAL_RETRY_DELAY;
 
         if (ota.HasNewVersion()) {
             if (UpgradeFirmware(ota)) {
-                return; // This line will never be reached after reboot
+                return true; // This line will never be reached after reboot
             }
             // If upgrade failed, continue to normal operation (don't break, just fall through)
         }
@@ -196,6 +213,7 @@ void Application::CheckNewVersion(Ota& ota) {
             }
         }
     }
+    return true;
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -287,6 +305,64 @@ void Application::ToggleChatState() {
             protocol_->CloseAudioChannel();
         });
     }
+}
+
+void Application::SetChatActive(bool active) {
+    Schedule([this, active]() {
+        // Inspect the state when this request executes. Multiple HTTP requests
+        // can be queued before the first one has started the audio channel.
+        switch (device_state_) {
+            case kDeviceStateIdle:
+            case kDeviceStateConnecting:
+            case kDeviceStateListening:
+            case kDeviceStateSpeaking:
+                break;
+            default:
+                return;
+        }
+
+        if (active) {
+            if (device_state_ != kDeviceStateIdle) {
+                return;
+            }
+            if (!protocol_) {
+                ESP_LOGW(TAG, "Cannot wake chat before protocol initialization");
+                return;
+            }
+            if (!protocol_->IsAudioChannelOpened()) {
+                SetDeviceState(kDeviceStateConnecting);
+                if (!protocol_->OpenAudioChannel()) {
+                    // Open may have allocated transport resources before a
+                    // failed handshake. Release them and make retry possible.
+                    protocol_->CloseAudioChannel();
+                    SetDeviceState(kDeviceStateIdle);
+                    return;
+                }
+            }
+            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+            return;
+        }
+
+        // A remotely closed channel can already have returned the state to
+        // Idle while decoded PCM is still queued. Explicit sleep must flush
+        // that residue even when there is no live session left to close.
+        audio_service_.ResetDecoder();
+        if (device_state_ == kDeviceStateIdle &&
+            (!protocol_ || !protocol_->IsAudioChannelOpened())) {
+            return;
+        }
+        if (device_state_ == kDeviceStateListening && protocol_) {
+            protocol_->SendStopListening();
+        } else if (device_state_ == kDeviceStateSpeaking) {
+            AbortSpeaking(kAbortReasonNone);
+        }
+        // StopListening schedules another closure and therefore cannot be
+        // composed here: stop/abort must run before the state becomes Idle.
+        if (protocol_) {
+            protocol_->CloseAudioChannel();
+        }
+        SetDeviceState(kDeviceStateIdle);
+    });
 }
 
 void Application::StartListening() {
@@ -395,7 +471,10 @@ void Application::Start() {
 
     // Check for new firmware version or get the MQTT broker address
     Ota ota;
-    CheckNewVersion(ota);
+    if (!CheckNewVersion(ota)) {
+        // Keep the recovery prompt visible; do not start an empty MQTT client.
+        return;
+    }
 
     // Initialize the protocol
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
@@ -423,9 +502,23 @@ void Application::Start() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (device_state_ == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        if (!packet) return;
+        if (pending_incoming_audio_.fetch_add(1, std::memory_order_relaxed) >= MAX_DECODE_PACKETS_IN_QUEUE) {
+            pending_incoming_audio_.fetch_sub(1, std::memory_order_relaxed);
+            return;
         }
+        // Protocol callbacks arrive in wire order. Queue audio alongside the
+        // TTS start/stop transitions instead of inspecting the old state on the
+        // transport reader, which can otherwise drop the first TTS packets.
+        auto pending = std::make_shared<std::unique_ptr<AudioStreamPacket>>(std::move(packet));
+        Schedule([this, pending]() {
+            [[maybe_unused]] bool queued = false;
+            if (!aborted_ && device_state_ == kDeviceStateSpeaking &&
+                !audio_service_.IsLocalPlaybackActive()) {
+                queued = audio_service_.PushPacketToDecodeQueue(std::move(*pending));
+            }
+            pending_incoming_audio_.fetch_sub(1, std::memory_order_relaxed);
+        });
     });
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
         board.SetPowerSaveMode(false);
@@ -437,6 +530,14 @@ void Application::Start() {
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveMode(true);
         Schedule([this]() {
+            // A newer wake can reopen the channel before this queued close
+            // notification executes. Do not tear down that newer session or
+            // replace setup/upgrade states with standby.
+            if (protocol_ && protocol_->IsAudioChannelOpened()) return;
+            if (device_state_ != kDeviceStateIdle &&
+                device_state_ != kDeviceStateConnecting &&
+                device_state_ != kDeviceStateListening &&
+                device_state_ != kDeviceStateSpeaking) return;
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
@@ -445,10 +546,19 @@ void Application::Start() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        if (!cJSON_IsString(type)) return;
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
+            if (!cJSON_IsString(state)) return;
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
+                    // A cloud acknowledgement after self.music.play must not
+                    // replace the SD track. Explicit user listening still
+                    // cancels local playback through EnableVoiceProcessing.
+                    if (audio_service_.IsLocalPlaybackActive()) return;
+                    // A stop request may close the session before an already
+                    // queued (or late MQTT) TTS start reaches MainEventLoop.
+                    if (!protocol_ || !protocol_->IsAudioChannelOpened()) return;
                     aborted_ = false;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
                         SetDeviceState(kDeviceStateSpeaking);
@@ -456,6 +566,7 @@ void Application::Start() {
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
+                    if (audio_service_.IsLocalPlaybackActive()) return;
                     if (device_state_ == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
@@ -469,6 +580,7 @@ void Application::Start() {
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([this, display, message = std::string(text->valuestring)]() {
+                        if (audio_service_.IsLocalPlaybackActive()) return;
                         display->SetChatMessage("assistant", message.c_str());
                     });
                 }

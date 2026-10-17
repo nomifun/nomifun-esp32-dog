@@ -1,0 +1,13 @@
+{
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "zfsn-esp32s3-dog",
+            "sdkconfig_append": [
+                "CONFIG_BOARD_TYPE_ZFSN_ESP32S3_DOG=y",
+                "CONFIG_ESPTOOLPY_FLASHMODE_DIO=y",
+                "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y"
+            ]
+        }
+    ]
+}

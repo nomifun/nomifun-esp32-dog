@@ -435,6 +435,10 @@ choice BOARD_TYPE
     config BOARD_TYPE_AIPI_LITE
         bool "AIPI-Lite"
         depends on IDF_TARGET_ESP32S3
+
+    config BOARD_TYPE_ZFSN_ESP32S3_DOG
+        bool "ZFSN ESP32S3 Dog"
+        depends on IDF_TARGET_ESP32S3
 endchoice
 
 choice

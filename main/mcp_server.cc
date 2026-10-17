@@ -7,6 +7,8 @@
 #include <esp_log.h>
 #include <esp_app_desc.h>
 #include <algorithm>
+#include <climits>
+#include <cmath>
 #include <cstring>
 #include <esp_pthread.h>
 
@@ -446,12 +448,17 @@ void McpServer::ReplyResult(int id, const std::string& result) {
 }
 
 void McpServer::ReplyError(int id, const std::string& message) {
-    std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
-    payload += std::to_string(id);
-    payload += ",\"error\":{\"message\":\"";
-    payload += message;
-    payload += "\"}}";
-    Application::GetInstance().SendMcpMessage(payload);
+    auto root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    cJSON_AddNumberToObject(root, "id", id);
+    auto error = cJSON_AddObjectToObject(root, "error");
+    cJSON_AddStringToObject(error, "message", message.c_str());
+    char* payload = cJSON_PrintUnformatted(root);
+    if (payload) {
+        Application::GetInstance().SendMcpMessage(payload);
+        cJSON_free(payload);
+    }
+    cJSON_Delete(root);
 }
 
 void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools) {
@@ -461,6 +468,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     bool found_cursor = cursor.empty();
     auto it = tools_.begin();
     std::string next_cursor = "";
+    size_t listed_tools = 0;
     
     while (it != tools_.end()) {
         // 如果我们还没有找到起始位置，继续搜索
@@ -487,6 +495,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
         }
         
         json += tool_json;
+        ++listed_tools;
         ++it;
     }
     
@@ -507,10 +516,14 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
         json += "],\"nextCursor\":\"" + next_cursor + "\"}";
     }
     
+    ESP_LOGI(TAG, "tools/list id=%d count=%u has_next=%d", id,
+             static_cast<unsigned>(listed_tools), !next_cursor.empty());
     ReplyResult(id, json);
 }
 
 void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments) {
+    // Log only the public tool identity, never arguments, credentials or text.
+    ESP_LOGI(TAG, "tools/call received id=%d name=%s", id, tool_name.c_str());
     auto tool_iter = std::find_if(tools_.begin(), tools_.end(), 
                                  [&tool_name](const McpTool* tool) { 
                                      return tool->name() == tool_name; 
@@ -527,16 +540,26 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         for (auto& argument : arguments) {
             bool found = false;
             if (cJSON_IsObject(tool_arguments)) {
-                auto value = cJSON_GetObjectItem(tool_arguments, argument.name().c_str());
-                if (argument.type() == kPropertyTypeBoolean && cJSON_IsBool(value)) {
+                auto value = cJSON_GetObjectItemCaseSensitive(tool_arguments, argument.name().c_str());
+                if (value == nullptr) {
+                    // An absent optional argument retains its declared default.
+                } else if (argument.type() == kPropertyTypeBoolean && cJSON_IsBool(value)) {
                     argument.set_value<bool>(value->valueint == 1);
                     found = true;
                 } else if (argument.type() == kPropertyTypeInteger && cJSON_IsNumber(value)) {
-                    argument.set_value<int>(value->valueint);
+                    const double number = value->valuedouble;
+                    if (!std::isfinite(number) || std::trunc(number) != number ||
+                        number < INT_MIN || number > INT_MAX) {
+                        throw std::invalid_argument("Expected a finite integer: " + argument.name());
+                    }
+                    argument.set_value<int>(static_cast<int>(number));
                     found = true;
                 } else if (argument.type() == kPropertyTypeString && cJSON_IsString(value)) {
                     argument.set_value<std::string>(value->valuestring);
                     found = true;
+                } else {
+                    // Explicit invalid input must never turn into a default action.
+                    throw std::invalid_argument("Invalid argument type: " + argument.name());
                 }
             }
 
@@ -557,6 +580,7 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
         try {
             ReplyResult(id, (*tool_iter)->Call(arguments));
+            ESP_LOGI(TAG, "tools/call returned id=%d name=%s", id, (*tool_iter)->name().c_str());
         } catch (const std::exception& e) {
             ESP_LOGE(TAG, "tools/call: %s", e.what());
             ReplyError(id, e.what());

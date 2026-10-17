@@ -3,9 +3,16 @@
 
 #include "board.h"
 
+class WifiStation;
+
+// esp-wifi-connect 3.x no longer exposes WifiStation as a singleton;
+// WifiBoard keeps a shared instance for all wifi boards.
+WifiStation& GetWifiStation();
+
 class WifiBoard : public Board {
 protected:
     bool wifi_config_mode_ = false;
+    std::string wifi_connection_failure_;
     void EnterWifiConfigMode();
     virtual std::string GetBoardJson() override;
 

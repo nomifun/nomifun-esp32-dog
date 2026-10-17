@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -64,12 +65,13 @@ enum AudioTaskType {
     kAudioTaskTypeEncodeToSendQueue,
     kAudioTaskTypeEncodeToTestingQueue,
     kAudioTaskTypeDecodeToPlaybackQueue,
+    kAudioTaskTypeLocalPlayback,
 };
 
 struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
-    uint32_t timestamp;
+    uint32_t timestamp = 0;
 };
 
 struct DebugStatistics {
@@ -106,6 +108,15 @@ public:
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
+    // Single producer; PCM is mono at codec_->output_sample_rate() (24 kHz on Dog).
+    // Chunks must be at most 200 ms. A false write means timeout or preemption.
+    bool BeginLocalPlayback();
+    bool WriteLocalPlayback(std::vector<int16_t>&& pcm);
+    bool IsLocalPlaybackActive();
+    // Drain accepted chunks, then restore the requested wake-word state.
+    void EndLocalPlayback();
+    // Explicit user interaction or media stop; discard pending local chunks.
+    void CancelLocalPlayback();
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
@@ -130,7 +141,9 @@ private:
     TaskHandle_t audio_input_task_handle_ = nullptr;
     TaskHandle_t audio_output_task_handle_ = nullptr;
     TaskHandle_t opus_codec_task_handle_ = nullptr;
+    std::mutex service_lifecycle_mutex_;
     std::mutex audio_queue_mutex_;
+    std::mutex decoder_mutex_;
     std::condition_variable audio_queue_cv_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_decode_queue_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_send_queue_;
@@ -139,11 +152,19 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
+    uint32_t service_generation_ = 0;
+    uint32_t decode_generation_ = 0;
+    uint32_t local_playback_generation_ = 0;
+    size_t local_playback_pending_ = 0;
+    bool local_playback_active_ = false;
+    bool audio_output_in_progress_ = false;
+    bool audio_decode_in_progress_ = false;
+    bool wake_word_requested_ = false;
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
     bool voice_detected_ = false;
-    bool service_stopped_ = true;
+    std::atomic<bool> service_stopped_{true};
     bool audio_input_need_warmup_ = false;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
@@ -156,6 +177,10 @@ private:
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();
+    // The following helpers require audio_queue_mutex_.
+    void CancelLocalPlaybackLocked(bool restore_wake_word);
+    void SetWakeWordDetectionLocked(bool enable);
+    void ResetDecoderLocked();
 };
 
 #endif

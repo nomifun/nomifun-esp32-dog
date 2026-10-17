@@ -14,12 +14,28 @@
 #include <font_awesome.h>
 #include <wifi_station.h>
 #include <wifi_configuration_ap.h>
+#include <wifi_manager.h>
 #include <ssid_manager.h>
 #include "afsk_demod.h"
 
 static const char *TAG = "WifiBoard";
 
+WifiStation& GetWifiStation() {
+    static WifiStation wifi_station;
+    return wifi_station;
+}
+
+static WifiConfigurationAp& GetWifiAp() {
+    static WifiConfigurationAp wifi_ap;
+    return wifi_ap;
+}
+
 WifiBoard::WifiBoard() {
+    // esp-wifi-connect 3.x: WifiManager::Initialize() performs
+    // nvs_flash_init / esp_netif_init / esp_wifi_init required by
+    // the standalone WifiStation and WifiConfigurationAp instances.
+    WifiManager::GetInstance().Initialize();
+
     Settings settings("wifi", true);
     wifi_config_mode_ = settings.GetInt("force_ap") == 1;
     if (wifi_config_mode_) {
@@ -36,9 +52,13 @@ void WifiBoard::EnterWifiConfigMode() {
     auto& application = Application::GetInstance();
     application.SetDeviceState(kDeviceStateWifiConfiguring);
 
-    auto& wifi_ap = WifiConfigurationAp::GetInstance();
+    auto& wifi_ap = GetWifiAp();
     wifi_ap.SetLanguage(Lang::CODE);
     wifi_ap.SetSsidPrefix("Xiaozhi");
+    wifi_ap.SetConnectionFailure(wifi_connection_failure_);
+    // This board uses its own AP instance rather than WifiManager's instance.
+    // /exit runs this callback in a deferred task after sending the response.
+    wifi_ap.OnExitRequested([]() { esp_restart(); });
     wifi_ap.Start();
 
     // Wait 1.5 seconds to display board information
@@ -52,6 +72,10 @@ void WifiBoard::EnterWifiConfigMode() {
     
     // Announce WiFi configuration prompt
     application.Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear", Lang::Sounds::OGG_WIFICONFIG);
+    if (!wifi_connection_failure_.empty()) {
+        // Keep the detailed reason visible after the hotspot hint.
+        Board::GetInstance().GetDisplay()->SetChatMessage("system", wifi_connection_failure_.c_str());
+    }
 
     #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
     auto display = Board::GetInstance().GetDisplay();
@@ -86,7 +110,7 @@ void WifiBoard::StartNetwork() {
         return;
     }
 
-    auto& wifi_station = WifiStation::GetInstance();
+    auto& wifi_station = GetWifiStation();
     wifi_station.OnScanBegin([this]() {
         auto display = Board::GetInstance().GetDisplay();
         display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
@@ -108,7 +132,25 @@ void WifiBoard::StartNetwork() {
 
     // Try to connect to WiFi, if failed, launch the WiFi configuration AP
     if (!wifi_station.WaitForConnected(60 * 1000)) {
+        // Stop unregisters callbacks first and preserves the last reason, so
+        // reading the attempted SSID cannot race another scan/connect callback.
+        // Association alone is insufficient: WaitForConnected waits for DHCP.
         wifi_station.Stop();
+        const int reason = wifi_station.GetLastDisconnectReason();
+        if (wifi_station.GetSsid().empty() || reason == WIFI_REASON_NO_AP_FOUND) {
+            wifi_connection_failure_ = "未找到已保存的Wi-Fi，请确认名称、2.4GHz频段及信号后重试。";
+        } else if (reason == WIFI_REASON_AUTH_FAIL || reason == WIFI_REASON_AUTH_EXPIRE ||
+                   reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT || reason == WIFI_REASON_HANDSHAKE_TIMEOUT) {
+            wifi_connection_failure_ = "Wi-Fi认证或握手失败，请检查密码和路由器安全设置。";
+        } else if (reason == WIFI_REASON_ASSOC_FAIL || reason == WIFI_REASON_CONNECTION_FAIL) {
+            wifi_connection_failure_ = "路由器连接失败，请检查信号、接入限制及安全设置。";
+        } else if (reason == 0) {
+            wifi_connection_failure_ = "Wi-Fi未在60秒内取得IP地址，请检查路由器DHCP及信号。";
+        } else {
+            wifi_connection_failure_ = "Wi-Fi连接中断，请检查路由器和信号后重试。";
+        }
+        if (reason != 0) wifi_connection_failure_ += " 原因码：" + std::to_string(reason);
+        ESP_LOGW(TAG, "Station setup failed, reason=%d; returning to provisioning", reason);
         wifi_config_mode_ = true;
         EnterWifiConfigMode();
         return;
@@ -124,7 +166,7 @@ const char* WifiBoard::GetNetworkStateIcon() {
     if (wifi_config_mode_) {
         return FONT_AWESOME_WIFI;
     }
-    auto& wifi_station = WifiStation::GetInstance();
+    auto& wifi_station = GetWifiStation();
     if (!wifi_station.IsConnected()) {
         return FONT_AWESOME_WIFI_SLASH;
     }
@@ -140,7 +182,7 @@ const char* WifiBoard::GetNetworkStateIcon() {
 
 std::string WifiBoard::GetBoardJson() {
     // Set the board type for OTA
-    auto& wifi_station = WifiStation::GetInstance();
+    auto& wifi_station = GetWifiStation();
     std::string board_json = R"({)";
     board_json += R"("type":")" + std::string(BOARD_TYPE) + R"(",)";
     board_json += R"("name":")" + std::string(BOARD_NAME) + R"(",)";
@@ -156,8 +198,8 @@ std::string WifiBoard::GetBoardJson() {
 }
 
 void WifiBoard::SetPowerSaveMode(bool enabled) {
-    auto& wifi_station = WifiStation::GetInstance();
-    wifi_station.SetPowerSaveMode(enabled);
+    auto& wifi_station = GetWifiStation();
+    wifi_station.SetPowerSaveLevel(enabled ? WifiPowerSaveLevel::LOW_POWER : WifiPowerSaveLevel::PERFORMANCE);
 }
 
 void WifiBoard::ResetWifiConfiguration() {
@@ -238,7 +280,7 @@ std::string WifiBoard::GetDeviceStatusJson() {
 
     // Network
     auto network = cJSON_CreateObject();
-    auto& wifi_station = WifiStation::GetInstance();
+    auto& wifi_station = GetWifiStation();
     cJSON_AddStringToObject(network, "type", "wifi");
     cJSON_AddStringToObject(network, "ssid", wifi_station.GetSsid().c_str());
     int rssi = wifi_station.GetRssi();

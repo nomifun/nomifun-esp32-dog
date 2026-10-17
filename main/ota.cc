@@ -442,8 +442,8 @@ std::string Ota::GetActivationPayload() {
 }
 
 esp_err_t Ota::Activate() {
-    if (!has_activation_challenge_) {
-        ESP_LOGW(TAG, "No activation challenge found");
+    if (!has_activation_challenge_ && !has_activation_code_) {
+        ESP_LOGW(TAG, "No activation challenge or code found");
         return ESP_FAIL;
     }
 
@@ -456,7 +456,9 @@ esp_err_t Ota::Activate() {
 
     auto http = SetupHttp();
 
-    std::string data = GetActivationPayload();
+    // Local code-based backends poll using Device-Id after the owner claims the
+    // code. A challenge/HMAC is optional; preserve that flow when supplied.
+    std::string data = has_activation_challenge_ ? GetActivationPayload() : "{}";
     http->SetContent(std::move(data));
 
     if (!http->Open("POST", url)) {

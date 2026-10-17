@@ -1,5 +1,6 @@
 ## IDF Component Manager Manifest File
 dependencies:
+  espressif/esp_audio_codec: ==2.6.2
   waveshare/esp_lcd_sh8601: 1.0.2
   espressif/esp_lcd_ili9341: ==1.2.0
   espressif/esp_lcd_gc9a01: ==2.0.1
@@ -18,13 +19,19 @@ dependencies:
   espressif/esp_io_expander_tca9554: ==2.0.0
   espressif/esp_lcd_panel_io_additions: ^1.0.1
   78/esp_lcd_nv3023: ~1.0.0
-  78/esp-wifi-connect: ~2.6.2
+  # Local copy of esp-wifi-connect 3.1.5 with this board's provisioning portal and fixes (see components/78__esp-wifi-connect).
+  78/esp-wifi-connect:
+    version: ==3.1.5
+    override_path: ../components/78__esp-wifi-connect
   78/esp-opus-encoder: ~2.4.1
-  78/esp-ml307: ~3.5.1
+  78/esp-ml307:
+    version: ==3.5.3
+    override_path: ../components/78__esp-ml307
   78/xiaozhi-fonts: ~1.5.5
   espressif/led_strip: ~3.0.1
   espressif/esp_codec_dev: ~1.5
-  espressif/esp-sr: ~2.2.0
+  # Pinned: this version was verified on hardware with the wake-word model in dog_assets.bin.
+  espressif/esp-sr: ==2.2.2
   espressif/button: ~4.1.3
   espressif/knob: ^1.0.0
   espressif/esp_video:
